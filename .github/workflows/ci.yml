@@ -135,7 +135,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov pytest-asyncio moto[s3,dynamodb,cloudwatch]
+          pip install -r requirements-dev.txt
 
       - name: Execute Full Pytest Suite with Coverage
         run: |
@@ -165,7 +165,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install moto[s3,dynamodb,cloudwatch] locust
+          pip install -r requirements-dev.txt
 
       - name: Execute Enterprise Chaos Simulator
         run: |
