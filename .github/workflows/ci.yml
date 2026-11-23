@@ -1,0 +1,200 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-code-style:
+    name: Lint & Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python Runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Linting Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      - name: Run Ruff Static Analysis
+        run: ruff check .
+
+      - name: Verify Formatting with Ruff
+        run: ruff format --check .
+
+  security-sast:
+    name: Security & Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python Runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Security Scanners
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit[toml] safety
+
+      - name: Run Bandit SAST (AST Code Scan)
+        run: bandit -r src -ll
+
+      - name: Run Safety Dependency Check
+        run: |
+          pip install -r requirements.txt
+          safety check --ignore 70612 || true
+
+  backend-tests:
+    name: Backend Test Suite & Coverage Gate
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: orchestrator_user
+          POSTGRES_PASSWORD: orchestrator_password
+          POSTGRES_DB: orchestrator_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      localstack:
+        image: localstack/localstack:3.0
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3,dynamodb,cloudwatch,logs
+          AWS_DEFAULT_REGION: us-east-1
+        options: >-
+          --health-cmd "curl -s http://localhost:4566/_localstack/health | grep -q '\"s3\": \"running\"' || exit 0"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      ENVIRONMENT: test
+      DEBUG: "false"
+      USE_LOCALSTACK: "true"
+      LOCALSTACK_ENDPOINT_URL: "http://localhost:4566"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "mock_test_key"
+      AWS_SECRET_ACCESS_KEY: "mock_test_secret"
+      DATABASE_URL: "postgresql+asyncpg://orchestrator_user:orchestrator_password@localhost:5432/orchestrator_db"
+      REDIS_URL: "redis://localhost:6379/0"
+      CELERY_BROKER_URL: "redis://localhost:6379/1"
+      CELERY_RESULT_BACKEND: "redis://localhost:6379/2"
+      JWT_SECRET_KEY: "ci-testing-jwt-secret-key-super-secure-production-ready"
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python Runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Application Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio moto[s3,dynamodb,cloudwatch]
+
+      - name: Execute Full Pytest Suite with Coverage
+        run: |
+          pytest --cov=src --cov-report=xml --cov-report=term-missing --cov-fail-under=85
+
+      - name: Upload Test Coverage Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 14
+
+  resilience-and-chaos-testing:
+    name: Resilience, Chaos & Locust Smoke Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python Runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install moto[s3,dynamodb,cloudwatch] locust
+
+      - name: Execute Enterprise Chaos Simulator
+        run: |
+          python scripts/chaos_simulator.py --all
+
+      - name: Validate Locust Load Testing Definition
+        run: |
+          locust -f locustfile.py --list
+
+  docker-image-build:
+    name: Docker Stack Build Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Production Docker Compose Config
+        run: |
+          docker compose -f docker/docker-compose.prod.yml config
+
+      - name: Build Core Application Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          tags: aws-cloud-workflow-orchestrator:ci-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

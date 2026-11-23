@@ -1,0 +1,160 @@
+version: "3.8"
+
+services:
+  # ==========================================================================
+  # FastAPI Orchestration Engine API
+  # ==========================================================================
+  orchestrator-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    container_name: orchestrator-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ..:/workspace
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=DEBUG
+      - LOG_JSON_FORMAT=false
+      - USE_LOCALSTACK=true
+      - LOCALSTACK_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - S3_BUCKET_NAME=cloud-orchestrator-payload-staging
+      - DYNAMODB_STATE_TABLE=Orchestrator_Workflow_Ledger
+      - DYNAMODB_DEFAULT_TARGET_TABLE=Migrated_Production_Records
+      - CLOUDWATCH_NAMESPACE=CloudWorkflowOrchestrator
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/orchestrator_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    networks:
+      - orchestrator-net
+
+  # ==========================================================================
+  # Celery Asynchronous Worker Pool
+  # ==========================================================================
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    container_name: orchestrator-celery-worker-dev
+    restart: unless-stopped
+    command: ["celery", "-A", "src.workers.celery_app.celery_app", "worker", "-l", "INFO", "-c", "2", "-Q", "critical,high,default,low,orchestrator_tasks"]
+    volumes:
+      - ..:/workspace
+    environment:
+      - ENVIRONMENT=development
+      - USE_LOCALSTACK=true
+      - LOCALSTACK_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - S3_BUCKET_NAME=cloud-orchestrator-payload-staging
+      - DYNAMODB_STATE_TABLE=Orchestrator_Workflow_Ledger
+      - DYNAMODB_DEFAULT_TARGET_TABLE=Migrated_Production_Records
+      - CLOUDWATCH_NAMESPACE=CloudWorkflowOrchestrator
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/orchestrator_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    networks:
+      - orchestrator-net
+
+  # ==========================================================================
+  # PostgreSQL 16 - Relational Metadata & Audit Database
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: orchestrator-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=orchestrator_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orchestrator_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - orchestrator-net
+
+  # ==========================================================================
+  # Redis 7 - Celery Broker, Pub/Sub & Caching Layer
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: orchestrator-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - orchestrator-net
+
+  # ==========================================================================
+  # LocalStack - Local AWS Cloud Emulator (S3, DynamoDB, CloudWatch)
+  # ==========================================================================
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: orchestrator-localstack
+    restart: unless-stopped
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,dynamodb,cloudwatch,logs
+      - AWS_DEFAULT_REGION=us-east-1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - ./init-localstack.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - orchestrator-net
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  localstack_data:
+    driver: local
+
+networks:
+  orchestrator-net:
+    driver: bridge
